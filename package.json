@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test:e2e": "npx playwright test",
-    "prepare": "npx playwright install --with-deps"
+    "prepare": "node -e \"if (process.env.VERCEL || process.env.CI) process.exit(0)\" && npx playwright install --with-deps"
   },
   "devDependencies": {
     "@types/react": "^19.2.17",
