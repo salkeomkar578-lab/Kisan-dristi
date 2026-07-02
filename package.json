@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test:e2e": "npx playwright test",
-    "prepare": "node -e \"if (process.env.VERCEL || process.env.CI) process.exit(0)\" && npx playwright install --with-deps"
+    "prepare": "node -e \"if (process.env.VERCEL || process.env.CI) process.exit(0); require('child_process').spawnSync('npx', ['playwright', 'install', '--with-deps'], { stdio: 'inherit' });\""
   },
   "devDependencies": {
     "@types/react": "^19.2.17",
