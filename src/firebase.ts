@@ -7,9 +7,19 @@ import { initializeApp, getApps } from 'firebase/app';
 import { getAnalytics, logEvent, Analytics } from 'firebase/analytics';
 import {
   getFirestore, Firestore,
-  enableIndexedDbPersistence,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
 } from 'firebase/firestore';
-import { getAuth, Auth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged, GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
+import {
+  getAuth, Auth,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged,
+  GoogleAuthProvider,
+  signInWithPopup,
+} from 'firebase/auth';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -45,7 +55,6 @@ function ensureAuth(): Auth {
 
 export async function initFirebase(): Promise<void> {
   try {
-    // Auth is always available even if analytics or persistence fail.
     ensureAuth();
 
     try {
@@ -54,19 +63,27 @@ export async function initFirebase(): Promise<void> {
       analytics = null;
     }
 
-    // Firestore with offline persistence
+    // Firestore with modern persistent cache (replaces deprecated enableIndexedDbPersistence)
     if (!firestoreDb) {
-      firestoreDb = getFirestore(app);
       try {
-        await enableIndexedDbPersistence(firestoreDb);
+        firestoreDb = initializeFirestore(app, {
+          localCache: persistentLocalCache({
+            tabManager: persistentMultipleTabManager(),
+          }),
+        });
       } catch {
-        // Already enabled or multi-tab — fine to ignore
+        // Fall back to basic Firestore if persistence fails
+        firestoreDb = getFirestore(app);
       }
     }
 
     console.log('[Firebase] Initialized ✓  project:', firebaseConfig.projectId);
   } catch (err) {
     console.warn('[Firebase] Init failed (offline mode will be used):', err);
+    // Still try to get a basic Firestore instance
+    try {
+      if (!firestoreDb) firestoreDb = getFirestore(app);
+    } catch { /* ignore */ }
   }
 }
 
@@ -89,9 +106,7 @@ export async function signInAsGuest() {
 export function setDemoSession(email?: string) {
   if (typeof window === 'undefined') return;
   sessionStorage.setItem(GUEST_SESSION_KEY, '1');
-  if (email) {
-    sessionStorage.setItem(DEMO_EMAIL_KEY, email);
-  }
+  if (email) sessionStorage.setItem(DEMO_EMAIL_KEY, email);
 }
 
 export async function signOutUser() {
@@ -99,14 +114,10 @@ export async function signOutUser() {
     sessionStorage.removeItem(GUEST_SESSION_KEY);
     sessionStorage.removeItem(DEMO_EMAIL_KEY);
   }
-
   if (!auth?.currentUser) return;
-
   try {
     await signOut(ensureAuth());
-  } catch {
-    // If auth is not fully configured, still end the local session.
-  }
+  } catch { /* If auth is not fully configured, still end the local session */ }
 }
 
 export function onAuthChanged(cb: (user: import('firebase/auth').User | null) => void) {

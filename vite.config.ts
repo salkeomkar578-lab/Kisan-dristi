@@ -7,7 +7,12 @@ export default defineConfig({
     react(),
     tailwindcss(),
   ],
+  base: './',
+  build: {
+    outDir: 'dist',
+    sourcemap: false,
+  },
   server: {
-    host: true, // expose to LAN for mobile device testing
+    host: true,
   },
 })

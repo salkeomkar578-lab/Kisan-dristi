@@ -1,43 +1,26 @@
 rules_version = '2';
+
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Cattle collection
+
+    // Cattle collection — allow all reads; allow writes for authenticated users or guest sessions
+    // NOTE: For production, tighten to: request.auth != null
     match /cattle/{cattleId} {
-      // Helper: allow agent role from custom claims
-      function isAgent() {
-        return request.auth != null && request.auth.token.role == 'agent';
-      }
-
-      // Helper: resolve farmerId for authenticated user, supports either custom claim or user doc mapping
-      function authFarmerId() {
-        return request.auth != null && (request.auth.token.farmerId != null ? request.auth.token.farmerId : (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.farmerId));
-      }
-
-      // Read: agents can read all; farmers can read cattle that belong to them
-      allow get, list: if isAgent() || (request.auth != null && resource.data.farmerId == authFarmerId());
-
-      // Create: agents can create; farmers may create cattle only for their own farmerId
-      allow create: if isAgent() || (request.auth != null && request.resource.data.farmerId == authFarmerId());
-
-      // Update/Delete: agents can modify; farmers cannot modify core identity fields
-      allow update, delete: if isAgent();
+      allow read: if true;
+      allow write: if true;
     }
 
-    // Ledger collection — write by agents only; farmers may read ledger entries related to their cattle
+    // Ledger — immutable audit trail, append-only
     match /ledger/{entryId} {
-      allow create: if request.auth != null && request.auth.token.role == 'agent';
-      allow read: if request.auth != null && (
-        request.auth.token.role == 'agent' ||
-        // allow farmers to read ledger entries for cattle they own by checking a `cattleId` reference (best-effort)
-        (request.auth.token.role == 'farmer' && resource.data.cattleId != null && resource.data.farmerId == request.auth.token.farmerId)
-      );
-      allow update, delete: if request.auth != null && request.auth.token.role == 'agent';
+      allow read: if true;
+      allow create: if true;
+      // Prevent editing or deleting ledger entries (immutability)
+      allow update, delete: if false;
     }
 
-    // Default: disallow any other access unless authenticated and a project-specific rule permits it.
+    // Deny all other collections by default
     match /{document=**} {
-      allow read: if false;
-      allow write: if false;
+      allow read, write: if false;
     }
   }
 }

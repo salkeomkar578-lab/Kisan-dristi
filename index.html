@@ -2,21 +2,105 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <meta name="theme-color" content="#030712" />
-    <meta name="description" content="Kisan-Drishti — Tamper-proof digital livestock identity for rural India. Edge AI biometric scanning, offline-first, cattle Aadhaar." />
+    <meta name="theme-color" content="#020817" />
+    <meta name="description" content="Kisan-Drishti — Tamper-proof digital livestock identity for rural India. Triple biometric scanning (muzzle, retina, face), offline-first, cattle Aadhaar system." />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Kisan-Drishti" />
+    <meta property="og:title" content="Kisan-Drishti | किसान-दृष्टि" />
+    <meta property="og:description" content="AI-powered cattle biometric identity system for rural India" />
+    <meta property="og:type" content="website" />
     <title>Kisan-Drishti | किसान-दृष्टि · Livestock Biometric Identity</title>
+
+    <!-- Preconnect for performance -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Noto+Sans+Devanagari:wght@400;700;900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
 
     <!-- TensorFlow.js via CDN to avoid Vite pre-bundle issues -->
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.1/dist/mobilenet.min.js"></script>
+
+    <style>
+      /* Loading screen shown before React mounts — prevents blank screen flash */
+      #app-loading {
+        position: fixed;
+        inset: 0;
+        background: linear-gradient(135deg, #020817 0%, #0a1628 50%, #0d0a1e 100%);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 20px;
+        z-index: 9999;
+        font-family: 'Inter', sans-serif;
+        transition: opacity 0.5s ease;
+      }
+      #app-loading.hidden {
+        opacity: 0;
+        pointer-events: none;
+      }
+      .loading-cow {
+        width: 80px;
+        height: 80px;
+        animation: cowBob 2s ease-in-out infinite;
+      }
+      .loading-ring {
+        width: 60px;
+        height: 60px;
+        border: 3px solid rgba(16,185,129,0.2);
+        border-top-color: #10b981;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+      }
+      .loading-text {
+        color: #94a3b8;
+        font-size: 14px;
+        font-weight: 500;
+        letter-spacing: 0.05em;
+      }
+      .loading-brand {
+        color: #10b981;
+        font-size: 22px;
+        font-weight: 900;
+        letter-spacing: -0.02em;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      @keyframes cowBob {
+        0%, 100% { transform: translateY(0); }
+        50% { transform: translateY(-10px); }
+      }
+    </style>
   </head>
   <body>
+    <!-- Loading screen (hidden once React mounts) -->
+    <div id="app-loading">
+      <div class="loading-brand">किसान-दृष्टि</div>
+      <div class="loading-ring"></div>
+      <div class="loading-text">Loading AI Biometric System…</div>
+    </div>
+
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <script type="module" src="./src/main.tsx"></script>
+    <script>
+      // Hide loading screen once React has mounted
+      document.addEventListener('DOMContentLoaded', () => {
+        const observer = new MutationObserver(() => {
+          const root = document.getElementById('root');
+          if (root && root.children.length > 0) {
+            const loader = document.getElementById('app-loading');
+            if (loader) {
+              loader.classList.add('hidden');
+              setTimeout(() => loader.remove(), 600);
+            }
+            observer.disconnect();
+          }
+        });
+        observer.observe(document.getElementById('root'), { childList: true });
+      });
+    </script>
   </body>
 </html>

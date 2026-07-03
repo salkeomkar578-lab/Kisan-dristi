@@ -32,7 +32,6 @@ export async function loadModel(): Promise<MobileNetModel> {
   if (loadPromise) return loadPromise;
 
   loadPromise = (async () => {
-    // Wait for CDN scripts to be available
     let attempts = 0;
     while ((!window.tf || !window.mobilenet) && attempts < 50) {
       await new Promise((r) => setTimeout(r, 200));
@@ -44,6 +43,7 @@ export async function loadModel(): Promise<MobileNetModel> {
 
     const m = await window.mobilenet.load({ version: 2, alpha: 1.0 });
     model = m;
+    console.log('[AI] MobileNet v2 loaded ✓');
     return m;
   })();
 
@@ -57,8 +57,8 @@ export function isModelLoaded(): boolean {
 // ─── Embedding Extraction ─────────────────────────────────────────────────────
 
 /**
- * Extract a biometric embedding from a video frame.
- * Returns a 1D number[] array.
+ * Extract a biometric embedding from a single video/image frame.
+ * Returns a 1D number[] array (1024 dimensions from MobileNet).
  */
 export async function extractVector(
   frameSource: FrameSource
@@ -80,23 +80,125 @@ export async function extractVector(
   return Array.from(data);
 }
 
+/**
+ * Extract a stable multi-frame embedding by averaging 3 captures.
+ * This produces a more reliable registration template.
+ */
+export async function extractMultiFrameEmbedding(
+  frameSource: FrameSource,
+  frames = 3,
+  intervalMs = 300
+): Promise<number[]> {
+  const vectors: number[][] = [];
+
+  for (let i = 0; i < frames; i++) {
+    const vec = await extractVector(frameSource);
+    vectors.push(vec);
+    if (i < frames - 1) await new Promise(r => setTimeout(r, intervalMs));
+  }
+
+  // Average the vectors
+  const dim = vectors[0].length;
+  const avg = new Array(dim).fill(0);
+  for (const vec of vectors) {
+    for (let j = 0; j < dim; j++) avg[j] += vec[j] / frames;
+  }
+  return avg;
+}
+
 // ─── Cosine Similarity ────────────────────────────────────────────────────────
 
 /**
- * Cosine similarity between two equal-length vectors. Returns 0–1.
+ * Numerically stable cosine similarity between two equal-length vectors. Returns 0–1.
  */
 export function cosineSimilarity(vecA: number[], vecB: number[]): number {
-  if (vecA.length !== vecB.length || vecA.length === 0) return 0;
+  if (!vecA?.length || !vecB?.length || vecA.length !== vecB.length) return 0;
 
   let dot = 0, normA = 0, normB = 0;
   for (let i = 0; i < vecA.length; i++) {
-    dot += vecA[i] * vecB[i];
+    dot   += vecA[i] * vecB[i];
     normA += vecA[i] * vecA[i];
     normB += vecB[i] * vecB[i];
   }
 
   const denom = Math.sqrt(normA) * Math.sqrt(normB);
-  return denom === 0 ? 0 : dot / denom;
+  if (denom === 0) return 0;
+  // Clamp to [0,1] to handle floating point errors
+  return Math.max(0, Math.min(1, dot / denom));
+}
+
+// ─── Verification with Unregistered Rejection ─────────────────────────────────
+
+export interface VerifyResult {
+  matched: boolean;
+  cattle: import('./db').Cattle | null;
+  confidence: number;
+  reason: 'MATCH' | 'BELOW_THRESHOLD' | 'UNREGISTERED' | 'NO_CATTLE_IN_DB';
+}
+
+/**
+ * Find best matching cattle from all registered animals.
+ * Returns UNREGISTERED if best score is below threshold.
+ * Returns MATCH only if score exceeds threshold AND is a clear winner (margin check).
+ */
+export function findBestMatch(
+  vec: number[],
+  allCattle: import('./db').Cattle[],
+  channel: 'muzzle' | 'retina' | 'face',
+  threshold: number
+): VerifyResult {
+  if (!allCattle.length) {
+    return { matched: false, cattle: null, confidence: 0, reason: 'NO_CATTLE_IN_DB' };
+  }
+
+  let bestCattle: import('./db').Cattle | null = null;
+  let bestScore = 0;
+  let secondBestScore = 0;
+
+  for (const c of allCattle) {
+    const emb = channel === 'muzzle' ? c.muzzleEmbedding
+               : channel === 'retina' ? c.retinaEmbedding
+               : c.faceEmbedding;
+    if (!emb?.length) continue;
+
+    const score = cosineSimilarity(vec, emb);
+    if (score > bestScore) {
+      secondBestScore = bestScore;
+      bestScore = score;
+      bestCattle = c;
+    } else if (score > secondBestScore) {
+      secondBestScore = score;
+    }
+  }
+
+  if (!bestCattle || bestScore < threshold) {
+    return {
+      matched: false,
+      cattle: bestCattle,
+      confidence: bestScore,
+      reason: 'BELOW_THRESHOLD',
+    };
+  }
+
+  // Margin check: best score must be meaningfully higher than second-best
+  // (prevents ambiguous matches where two animals look similar)
+  const margin = bestScore - secondBestScore;
+  if (margin < 0.02 && secondBestScore > 0) {
+    // Ambiguous — don't match
+    return {
+      matched: false,
+      cattle: null,
+      confidence: bestScore,
+      reason: 'UNREGISTERED',
+    };
+  }
+
+  return {
+    matched: true,
+    cattle: bestCattle,
+    confidence: bestScore,
+    reason: 'MATCH',
+  };
 }
 
 // ─── Liveness Detection ───────────────────────────────────────────────────────
@@ -112,8 +214,7 @@ export async function checkLiveness(
   const LIVENESS_THRESHOLD = 0.001;
 
   if (!(frameSource instanceof HTMLVideoElement)) {
-    // Static image fallback is accepted as a test-mode scan path.
-    return true;
+    return true; // Static image fallback accepted
   }
 
   const captureFrame = () =>
@@ -148,7 +249,6 @@ export async function checkLiveness(
 
 /**
  * Quick frame quality score 0–1 based on brightness variance.
- * Higher = better signal for positioning feedback.
  */
 export async function getFrameQuality(
   videoElement: HTMLVideoElement

@@ -1,12 +1,12 @@
 /**
  * firebaseSync.ts — Bidirectional sync between IndexedDB ↔ Firestore
  * Strategy: IndexedDB = offline-first truth, Firestore = cloud backup + cross-device
+ * FIXED: Push to cloud immediately after registration; retry on failure.
  */
 
 import {
   collection, doc, setDoc, getDocs, onSnapshot,
-  serverTimestamp, query, orderBy, Timestamp,
-  DocumentData, Unsubscribe,
+  serverTimestamp, Timestamp, DocumentData, Unsubscribe,
 } from 'firebase/firestore';
 import { firestoreDb, track } from './firebase';
 import {
@@ -21,9 +21,24 @@ const LEDGER_COL  = 'ledger';
 
 // ─── Type helpers ─────────────────────────────────────────────────────────────
 
-/** Strip functions/undefined from an object so Firestore can serialize it */
+/** Strip functions/undefined/Firestore objects so Firestore can serialize it */
 function clean<T extends Record<string, unknown>>(obj: T): Record<string, unknown> {
   return JSON.parse(JSON.stringify(obj));
+}
+
+// ─── Retry helper ─────────────────────────────────────────────────────────────
+
+async function withRetry<T>(fn: () => Promise<T>, retries = 3, delayMs = 1000): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (i < retries - 1) await new Promise(r => setTimeout(r, delayMs * (i + 1)));
+    }
+  }
+  throw lastErr;
 }
 
 // ─── Push ─────────────────────────────────────────────────────────────────────
@@ -31,19 +46,30 @@ function clean<T extends Record<string, unknown>>(obj: T): Record<string, unknow
 /**
  * Push a single cattle record to Firestore.
  * Embeddings are stored as-is (1024-float arrays).
+ * Retries up to 3 times on network failure.
  */
 export async function pushCattleToCloud(cattle: Cattle): Promise<void> {
-  if (!firestoreDb) return;
+  if (!firestoreDb) {
+    console.warn('[Sync] Firestore not initialized — skipping cloud push for:', cattle.id);
+    return;
+  }
   try {
-    const payload = { ...clean(cattle as unknown as Record<string, unknown>), lastModified: cattle.lastModified || Date.now(), syncedAt: serverTimestamp() };
-    await setDoc(
-      doc(firestoreDb, CATTLE_COL, cattle.id),
-      payload,
-      { merge: true }
-    );
+    await withRetry(async () => {
+      const payload = {
+        ...clean(cattle as unknown as Record<string, unknown>),
+        lastModified: cattle.lastModified || Date.now(),
+        syncedAt: serverTimestamp(),
+      };
+      await setDoc(
+        doc(firestoreDb!, CATTLE_COL, cattle.id),
+        payload,
+        { merge: true }
+      );
+    });
+    console.log('[Sync] ✓ Cattle pushed to cloud:', cattle.id);
     track('cattle_synced_to_cloud', { cattleId: cattle.id });
   } catch (err) {
-    console.warn('[Sync] pushCattleToCloud failed:', err);
+    console.warn('[Sync] pushCattleToCloud failed after retries:', err);
   }
 }
 
@@ -53,12 +79,18 @@ export async function pushCattleToCloud(cattle: Cattle): Promise<void> {
 export async function pushLedgerToCloud(entry: LedgerEntry): Promise<void> {
   if (!firestoreDb) return;
   try {
-    const payload = { ...clean(entry as unknown as Record<string, unknown>), lastModified: entry.lastModified || entry.timestamp, syncedAt: serverTimestamp() };
-    await setDoc(
-      doc(firestoreDb, LEDGER_COL, entry.id),
-      payload,
-      { merge: true }
-    );
+    await withRetry(async () => {
+      const payload = {
+        ...clean(entry as unknown as Record<string, unknown>),
+        lastModified: entry.lastModified || entry.timestamp,
+        syncedAt: serverTimestamp(),
+      };
+      await setDoc(
+        doc(firestoreDb!, LEDGER_COL, entry.id),
+        payload,
+        { merge: true }
+      );
+    });
   } catch (err) {
     console.warn('[Sync] pushLedgerToCloud failed:', err);
   }
@@ -82,19 +114,13 @@ export async function pullAllFromCloud(): Promise<{ added: number; skipped: numb
       const remote = d.data() as Cattle & { syncedAt?: unknown };
       const local = await db.get('cattle', remote.id);
 
-      // Determine remote last-modified time (from syncedAt) and local last-modified heuristic
       const remoteMs = remote.syncedAt && (remote.syncedAt as any) instanceof Timestamp
         ? (remote.syncedAt as Timestamp).toMillis()
         : typeof remote.syncedAt === 'number' ? (remote.syncedAt as number) : 0;
 
       const localLast = (() => {
         if (!local) return 0;
-        let m = local.registeredAt || 0;
-        if (Array.isArray(local.healthMetrics) && local.healthMetrics.length) {
-          const lastHealth = Math.max(...local.healthMetrics.map(h => new Date(h.date).getTime()));
-          m = Math.max(m, lastHealth);
-        }
-        return m;
+        return local.lastModified || local.registeredAt || 0;
       })();
 
       if (!local) {
@@ -102,7 +128,6 @@ export async function pullAllFromCloud(): Promise<{ added: number; skipped: numb
         await db.put('cattle', cattleData as Cattle);
         added++;
       } else if (remoteMs && remoteMs > localLast) {
-        // Remote is newer — overwrite local
         const { syncedAt: _s, ...cattleData } = remote as Cattle & { syncedAt?: unknown };
         await db.put('cattle', cattleData as Cattle);
         added++;
@@ -186,26 +211,13 @@ export function subscribeToCattleChanges(
             ? (remote.syncedAt as Timestamp).toMillis()
             : typeof remote.syncedAt === 'number' ? (remote.syncedAt as number) : 0;
 
-          const localLast = (() => {
-            if (!local) return 0;
-            let m = local.registeredAt || 0;
-            if (Array.isArray(local.healthMetrics) && local.healthMetrics.length) {
-              const lastHealth = Math.max(...local.healthMetrics.map(h => new Date(h.date).getTime()));
-              m = Math.max(m, lastHealth);
-            }
-            return m;
-          })();
+          const localLast = local ? (local.lastModified || local.registeredAt || 0) : 0;
 
-          if (!local) {
-            const { syncedAt: _s, ...cattleData } = remote as Cattle & { syncedAt?: unknown };
-            await db.put('cattle', cattleData as Cattle);
-            onNewCattle(cattleData as Cattle);
-          } else if (remoteMs && remoteMs > localLast) {
+          if (!local || (remoteMs && remoteMs > localLast)) {
             const { syncedAt: _s, ...cattleData } = remote as Cattle & { syncedAt?: unknown };
             await db.put('cattle', cattleData as Cattle);
             onNewCattle(cattleData as Cattle);
           }
-          // else: local is newer — ignore remote change
         }
       }
     },
